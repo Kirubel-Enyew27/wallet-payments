@@ -11,7 +11,7 @@ Standalone payment integration service for wallet payments: Telebirr, M-Pesa, Ya
 ## Run
 
 ```bash
-cd /home/k-i-r-a/Projects/cash-flow/wallet-payments-plugin
+cd ~/wallet-payments
 go mod tidy
 go run .
 ```
