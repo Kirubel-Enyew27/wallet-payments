@@ -3,7 +3,9 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"wallet-payments-plugin/internal/model"
 	"wallet-payments-plugin/internal/providers"
@@ -16,7 +18,7 @@ import (
 )
 
 type Handler struct {
-	Store     *store.Store
+	Store     store.Store
 	Providers map[string]providers.Provider
 	BaseURL   string
 }
@@ -49,7 +51,9 @@ type CallbackRequest struct {
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1 := r.Group("/api/v1")
 	{
+		v1.GET("/health", h.Health)
 		v1.POST("/payments", h.InitiatePayment)
+		v1.GET("/payments", h.ListPayments)
 		v1.GET("/payments/:id", h.GetPayment)
 		v1.POST("/payments/:id/complete", h.CompletePayment)
 		v1.POST("/callbacks/:provider", h.ProviderCallback)
@@ -57,6 +61,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 }
 
 func (h *Handler) InitiatePayment(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req InitiatePaymentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -86,6 +91,29 @@ func (h *Handler) InitiatePayment(c *gin.Context) {
 		return
 	}
 
+	idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if idempotencyKey != "" {
+		existing, err := h.Store.GetByIdempotencyKey(ctx, idempotencyKey)
+		if err == nil {
+			if existing.PaymentMethod != method || existing.Amount != req.Amount || existing.PhoneNumber != req.PhoneNumber {
+				response.Error(c, http.StatusConflict, "Idempotency key conflict", "idempotency key already used with different parameters")
+				return
+			}
+			resp := ProcessTransactionResponse{
+				Status:      string(existing.Status),
+				Channel:     string(existing.Channel),
+				PaymentURL:  existing.PaymentURL,
+				RedirectURL: strings.TrimRight(h.BaseURL, "/") + "/api/v1/payments/" + existing.ID,
+			}
+			response.Success(c, "Payment already initiated.", resp)
+			return
+		}
+		if err != nil && err != store.ErrNotFound {
+			response.Error(c, http.StatusInternalServerError, "Failed to check idempotency", err.Error())
+			return
+		}
+	}
+
 	transactionID := uuid.NewString()
 	initResult, err := provider.Initiate(c.Request.Context(), providers.InitiateRequest{
 		TransactionID: transactionID,
@@ -112,12 +140,16 @@ func (h *Handler) InitiatePayment(c *gin.Context) {
 		Channel:       channel,
 		PaymentURL:    initResult.PaymentURL,
 		ProviderRef:   initResult.ProviderRef,
+		IdempotencyKey: idempotencyKey,
 	}
 	if payment.PaymentURL == "" && channel == model.ChannelWeb {
 		payment.PaymentURL = strings.TrimRight(h.BaseURL, "/") + "/pay/" + transactionID
 	}
 
-	h.Store.Create(payment)
+	if err := h.Store.Create(ctx, payment); err != nil {
+		response.Error(c, http.StatusInternalServerError, "Failed to store payment", err.Error())
+		return
+	}
 
 	resp := ProcessTransactionResponse{
 		Status:      string(payment.Status),
@@ -134,8 +166,9 @@ func (h *Handler) InitiatePayment(c *gin.Context) {
 }
 
 func (h *Handler) GetPayment(c *gin.Context) {
+	ctx := c.Request.Context()
 	id := c.Param("id")
-	payment, err := h.Store.Get(id)
+	payment, err := h.Store.Get(ctx, id)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Payment not found", err.Error())
 		return
@@ -144,8 +177,9 @@ func (h *Handler) GetPayment(c *gin.Context) {
 }
 
 func (h *Handler) CompletePayment(c *gin.Context) {
+	ctx := c.Request.Context()
 	id := c.Param("id")
-	payment, err := h.Store.Get(id)
+	payment, err := h.Store.Get(ctx, id)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Payment not found", err.Error())
 		return
@@ -170,7 +204,7 @@ func (h *Handler) CompletePayment(c *gin.Context) {
 		return
 	}
 
-	if err := h.Store.Update(payment); err != nil {
+	if err := h.Store.Update(ctx, payment); err != nil {
 		response.Error(c, http.StatusInternalServerError, "Failed to update payment", err.Error())
 		return
 	}
@@ -179,6 +213,7 @@ func (h *Handler) CompletePayment(c *gin.Context) {
 }
 
 func (h *Handler) ProviderCallback(c *gin.Context) {
+	ctx := c.Request.Context()
 	providerName := strings.ToUpper(c.Param("provider"))
 	if providerName == "MPESA" {
 		providerName = "M-PESA"
@@ -195,7 +230,7 @@ func (h *Handler) ProviderCallback(c *gin.Context) {
 		return
 	}
 
-	payment, err := h.Store.Get(req.TransactionID)
+	payment, err := h.Store.Get(ctx, req.TransactionID)
 	if err != nil {
 		response.Error(c, http.StatusNotFound, "Payment not found", err.Error())
 		return
@@ -222,12 +257,87 @@ func (h *Handler) ProviderCallback(c *gin.Context) {
 		payment.PaymentURL = req.PaymentURL
 	}
 
-	if err := h.Store.Update(payment); err != nil {
+	if err := h.Store.Update(ctx, payment); err != nil {
 		response.Error(c, http.StatusInternalServerError, "Failed to update payment", err.Error())
 		return
 	}
 
 	response.Success(c, "Callback processed successfully", payment)
+}
+
+func (h *Handler) ListPayments(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	statusStr := strings.TrimSpace(c.Query("status"))
+	method := normalizeMethod(c.Query("method"))
+	if c.Query("method") != "" && method == "" {
+		response.Error(c, http.StatusBadRequest, "Invalid payment method", "method not supported")
+		return
+	}
+
+	var status model.PaymentStatus
+	if statusStr != "" {
+		switch strings.ToLower(statusStr) {
+		case "pending":
+			status = model.StatusPending
+		case "success":
+			status = model.StatusSuccess
+		case "failed":
+			status = model.StatusFailed
+		default:
+			response.Error(c, http.StatusBadRequest, "Invalid status", "status must be pending, success, or failed")
+			return
+		}
+	}
+
+	limit := parseIntDefault(c.Query("limit"), 50)
+	if limit > 200 {
+		limit = 200
+	}
+	offset := parseIntDefault(c.Query("offset"), 0)
+
+	var createdFrom *time.Time
+	if v := strings.TrimSpace(c.Query("created_from")); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "Invalid created_from", "must be RFC3339 timestamp")
+			return
+		}
+		createdFrom = &t
+	}
+
+	var createdTo *time.Time
+	if v := strings.TrimSpace(c.Query("created_to")); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			response.Error(c, http.StatusBadRequest, "Invalid created_to", "must be RFC3339 timestamp")
+			return
+		}
+		createdTo = &t
+	}
+
+	payments, err := h.Store.List(ctx, store.ListFilter{
+		Status:        status,
+		PaymentMethod: method,
+		CreatedFrom:   createdFrom,
+		CreatedTo:     createdTo,
+		Limit:         limit,
+		Offset:        offset,
+	})
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "Failed to list payments", err.Error())
+		return
+	}
+	response.Success(c, "Payments fetched successfully", payments)
+}
+
+func (h *Handler) Health(c *gin.Context) {
+	ctx := c.Request.Context()
+	if err := h.Store.Health(ctx); err != nil {
+		response.Error(c, http.StatusServiceUnavailable, "Database unavailable", err.Error())
+		return
+	}
+	response.Success(c, "ok", gin.H{"database": "ok"})
 }
 
 func normalizeMethod(method string) string {
@@ -256,4 +366,15 @@ func validatePhone(phone string) error {
 		return errors.New("phone_number must start with 251")
 	}
 	return nil
+}
+
+func parseIntDefault(value string, fallback int) int {
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

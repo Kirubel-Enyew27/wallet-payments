@@ -25,6 +25,7 @@ type Payment struct {
 	PaymentURL    string
 	ProviderRef   string
 	FailedReason  string
+	IdempotencyKey string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

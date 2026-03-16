@@ -22,8 +22,13 @@ func main() {
 		"AWASH":    providers.AwashProvider{},
 	}
 
+	dbStore, err := store.NewSQLStore(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	handler := &api.Handler{
-		Store:     store.New(),
+		Store:     dbStore,
 		Providers: providersMap,
 		BaseURL:   cfg.BaseURL,
 	}

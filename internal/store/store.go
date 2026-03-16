@@ -1,8 +1,8 @@
 package store
 
 import (
+	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"wallet-payments-plugin/internal/model"
@@ -10,40 +10,20 @@ import (
 
 var ErrNotFound = errors.New("payment not found")
 
-type Store struct {
-	mu       sync.RWMutex
-	payments map[string]*model.Payment
+type ListFilter struct {
+	Status        model.PaymentStatus
+	PaymentMethod string
+	CreatedFrom   *time.Time
+	CreatedTo     *time.Time
+	Limit         int
+	Offset        int
 }
 
-func New() *Store {
-	return &Store{payments: make(map[string]*model.Payment)}
-}
-
-func (s *Store) Create(p *model.Payment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p.CreatedAt = time.Now()
-	p.UpdatedAt = p.CreatedAt
-	s.payments[p.ID] = p
-}
-
-func (s *Store) Get(id string) (*model.Payment, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	p, ok := s.payments[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return p, nil
-}
-
-func (s *Store) Update(p *model.Payment) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.payments[p.ID]; !ok {
-		return ErrNotFound
-	}
-	p.UpdatedAt = time.Now()
-	s.payments[p.ID] = p
-	return nil
+type Store interface {
+	Create(ctx context.Context, p *model.Payment) error
+	Get(ctx context.Context, id string) (*model.Payment, error)
+	GetByIdempotencyKey(ctx context.Context, key string) (*model.Payment, error)
+	Update(ctx context.Context, p *model.Payment) error
+	List(ctx context.Context, filter ListFilter) ([]*model.Payment, error)
+	Health(ctx context.Context) error
 }
