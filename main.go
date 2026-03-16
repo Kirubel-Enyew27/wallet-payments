@@ -6,6 +6,7 @@ import (
 	"wallet-payments-plugin/internal/api"
 	"wallet-payments-plugin/internal/config"
 	"wallet-payments-plugin/internal/providers"
+	"wallet-payments-plugin/internal/router"
 	"wallet-payments-plugin/internal/store"
 
 	"github.com/gin-gonic/gin"
@@ -34,7 +35,7 @@ func main() {
 	}
 
 	r := gin.Default()
-	handler.RegisterRoutes(r)
+	router.Registerroutes(r, handler)
 
 	addr := ":8080"
 	log.Printf("wallet payments plugin listening on %s", addr)

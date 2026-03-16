@@ -48,18 +48,6 @@ type CallbackRequest struct {
 	PaymentURL    string `json:"payment_url"`
 }
 
-func (h *Handler) RegisterRoutes(r *gin.Engine) {
-	v1 := r.Group("/api/v1")
-	{
-		v1.GET("/health", h.Health)
-		v1.POST("/payments", h.InitiatePayment)
-		v1.GET("/payments", h.ListPayments)
-		v1.GET("/payments/:id", h.GetPayment)
-		v1.POST("/payments/:id/complete", h.CompletePayment)
-		v1.POST("/callbacks/:provider", h.ProviderCallback)
-	}
-}
-
 func (h *Handler) InitiatePayment(c *gin.Context) {
 	ctx := c.Request.Context()
 	var req InitiatePaymentRequest
@@ -132,14 +120,14 @@ func (h *Handler) InitiatePayment(c *gin.Context) {
 	}
 
 	payment := &model.Payment{
-		ID:            transactionID,
-		PaymentMethod: method,
-		Amount:        req.Amount,
-		PhoneNumber:   req.PhoneNumber,
-		Status:        model.StatusPending,
-		Channel:       channel,
-		PaymentURL:    initResult.PaymentURL,
-		ProviderRef:   initResult.ProviderRef,
+		ID:             transactionID,
+		PaymentMethod:  method,
+		Amount:         req.Amount,
+		PhoneNumber:    req.PhoneNumber,
+		Status:         model.StatusPending,
+		Channel:        channel,
+		PaymentURL:     initResult.PaymentURL,
+		ProviderRef:    initResult.ProviderRef,
 		IdempotencyKey: idempotencyKey,
 	}
 	if payment.PaymentURL == "" && channel == model.ChannelWeb {
